@@ -1,0 +1,76 @@
+version: '3.8'
+
+services:
+  openconnect:
+    build: .
+    container_name: openconnect-vpn
+    privileged: true
+    restart: unless-stopped
+    
+    # Port mappings
+    ports:
+      - "4443:4443/tcp"
+      - "4443:4443/udp"
+      - "80:80/tcp"    # For Let's Encrypt HTTP challenge (if using standalone mode)
+    
+    # Volume mappings - Mount host directory to /etc/ocserv in container
+    volumes:
+      - ./ocserv-data:/etc/ocserv
+    
+    # Environment variables for configuration
+    environment:
+      # Basic OpenConnect settings
+      - LISTEN_PORT=4443
+      - TUNNEL_MODE=all
+      - DNS_SERVERS=8.8.8.8,1.1.1.1,8.8.4.4,1.0.0.1
+      
+      # SSL Certificate settings
+      - SSL_DOMAIN=vpn.yourdomain.com
+      - ACME_STANDALONE=true
+      
+      # Optional: Use DNS challenge instead of standalone
+      # - ACME_DNS_PROVIDER=dns_cf  # For Cloudflare
+      
+      # Optional: Disable automatic SSL management
+      # - DISABLE_SSL_AUTO=true
+      
+      # Optional: Power user mode (disables automatic config updates)
+      # - POWER_USER=no
+    
+    # Additional environment variables for DNS challenge (if using Cloudflare example)
+    # environment:
+    #   - CF_Token=your_cloudflare_token
+    #   - CF_Account_ID=your_account_id
+    
+    # Logging
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+# Example with split tunneling
+  openconnect-split:
+    build: .
+    container_name: openconnect-vpn-split
+    privileged: true
+    restart: unless-stopped
+    profiles:
+      - split-tunnel  # Only start with --profile split-tunnel
+    
+    ports:
+      - "4444:4444/tcp"
+      - "4444:4444/udp"
+      - "80:80/tcp"
+    
+    volumes:
+      - ./ocserv-split-data:/etc/ocserv
+    
+    environment:
+      - LISTEN_PORT=4444
+      - TUNNEL_MODE=split-include
+      - TUNNEL_ROUTES=192.168.1.0/24,10.0.0.0/16
+      - SPLIT_DNS_DOMAINS=local.example.com,internal.corp
+      - DNS_SERVERS=192.168.1.1,8.8.8.8
+      - SSL_DOMAIN=vpn-split.yourdomain.com
+      - ACME_STANDALONE=true

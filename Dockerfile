@@ -1,11 +1,11 @@
 FROM alpine:latest
 
 MAINTAINER MarkusMcNugen
-# Forked from TommyLau for unRAID
+# Enhanced with automatic SSL certificate management using acme.sh
 
-VOLUME /config
+VOLUME /etc/ocserv
 
-# Install dependencies
+# Install dependencies including acme.sh requirements
 RUN buildDeps=" \
 		curl \
 		g++ \
@@ -38,8 +38,6 @@ RUN buildDeps=" \
 	"; \
 	set -x \
 	&& apk add --update --virtual .build-deps $buildDeps \
-	# The commented out line below grabs the most recent version of OC from the page which may be an unreleased version
-	# && export OC_VERSION=$(curl --silent "https://ocserv.gitlab.io/www/changelog.html" 2>&1 | grep -m 1 'Version' | awk '/Version/ {print $2}') \
 	# The line below grabs the 2nd most recent version of OC
 	&& export OC_VERSION=$(curl --silent "https://ocserv.gitlab.io/www/changelog.html" 2>&1 | grep -m 2 'Version' | tail -n 1 | awk '/Version/ {print $2}') \
 	&& curl -SL "ftp://ftp.infradead.org/pub/ocserv/ocserv-$OC_VERSION.tar.xz" -o ocserv.tar.xz \
@@ -61,19 +59,34 @@ RUN buildDeps=" \
 	&& apk add --update --virtual .run-deps $runDeps gnutls-utils iptables \
 	&& apk del .build-deps \
 	&& rm -rf /var/cache/apk/* 
-	
+
+# Install runtime dependencies and acme.sh requirements
 RUN apk add --update bash rsync ipcalc sipcalc ca-certificates rsyslog logrotate runit \
+	socat openssl coreutils grep sed gawk findutils \
 	&& rm -rf /var/cache/apk/* 
 
 RUN update-ca-certificates
 
+# Install acme.sh
+RUN curl -s https://get.acme.sh | sh -s email=admin@example.com \
+	&& ln -s ~/.acme.sh/acme.sh /usr/local/bin/acme.sh
+
+# Copy configuration files and scripts
 ADD ocserv /etc/default/ocserv
-
-WORKDIR /config
-
 COPY docker-entrypoint.sh /entrypoint.sh
+COPY ssl-manager.sh /usr/local/bin/ssl-manager.sh
+COPY check-ssl-cron.sh /usr/local/bin/check-ssl-cron.sh
+
+# Make scripts executable
+RUN chmod +x /entrypoint.sh /usr/local/bin/ssl-manager.sh /usr/local/bin/check-ssl-cron.sh
+
+# Create cron entry for SSL certificate checking (every 12 hours)
+RUN echo "0 */12 * * * /usr/local/bin/check-ssl-cron.sh >> /etc/ocserv/logs/ssl-check.log 2>&1" > /var/spool/cron/crontabs/root
+
+WORKDIR /etc/ocserv
+
 ENTRYPOINT ["/entrypoint.sh"]
 
 EXPOSE 4443
 EXPOSE 4443/udp
-CMD ["ocserv", "-c", "/config/ocserv.conf", "-f"]
+CMD ["ocserv", "-c", "/etc/ocserv/ocserv.conf", "-f"]
