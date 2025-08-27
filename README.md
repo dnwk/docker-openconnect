@@ -504,17 +504,17 @@ command: ["ocserv", "-c", "/etc/ocserv/ocserv.conf", "-f", "-d", "1"]  # Debug l
 
 ## 🏗️ Building and Deployment
 
-### Build from Source
+### Build from Source (Local Computer)
 
 ```bash
 # Clone repository
-git clone https://github.com/MarkusMcNugen/docker-openconnect.git
+git clone https://github.com/dnwk/docker-openconnect.git
 cd docker-openconnect
 
-# Build container
+# Build container locally
 docker build -t openconnect-ssl .
 
-# Run built container
+# Test locally (optional)
 docker run -d --privileged \
   --name openconnect-vpn \
   -p 4443:4443/tcp -p 4443:4443/udp -p 80:80 \
@@ -524,7 +524,628 @@ docker run -d --privileged \
   openconnect-ssl
 ```
 
-### Production Deployment Checklist
+### Export and Upload to Registry
+
+```bash
+# Option 1: Push to Docker Hub
+docker tag openconnect-ssl yourusername/openconnect-ssl:latest
+docker push yourusername/openconnect-ssl:latest
+
+# Option 2: Export as TAR file for offline transfer
+docker save -o openconnect-ssl.tar openconnect-ssl:latest
+
+# Option 3: Create multi-architecture build (recommended)
+docker buildx create --name multiarch-builder --use
+docker buildx build --platform linux/amd64,linux/arm64 \
+  -t yourusername/openconnect-ssl:latest --push .
+```
+
+### MikroTik RouterOS Deployment
+
+MikroTik RouterOS has limited Docker support through the Container package. Here's how to deploy with your existing `ocserv.conf`.
+
+#### 📋 Prerequisites for MikroTik Deployment
+
+```bash
+# Check RouterOS version and architecture
+/system resource print
+/system license print
+
+# Requirements:
+# - RouterOS v7.4+ 
+# - ARM64 or x86-64 architecture (not ARM32)
+# - Container package installed
+# - 2GB+ available storage
+```
+
+#### 🔧 Enable Container Support
+
+```bash
+# Enable container support (requires reboot)
+/system device-mode update container=yes
+/system reboot
+
+# After reboot, verify container support
+/container print
+```
+
+#### 🏗️ Method 1: Using Docker Hub Image
+
+**Step 1: Build and Push Image (On your computer)**
+
+```bash
+# Build for MikroTik architecture
+git clone https://github.com/dnwk/docker-openconnect.git
+cd docker-openconnect
+
+# Build multi-architecture image
+docker buildx create --name mikrotik-builder --use
+docker buildx build --platform linux/amd64,linux/arm64 \
+  -t yourusername/openconnect-ssl:latest --push .
+```
+
+**Step 2: Deploy on MikroTik RouterOS**
+
+```bash
+# Create directories for persistent data
+/file print
+# Note: Use external storage (USB) for persistence
+mkdir /usb1/ocserv-data
+mkdir /usb1/ocserv-data/certs
+mkdir /usb1/ocserv-data/logs
+
+# Copy your existing ocserv.conf
+# Upload via FTP/SFTP or copy from existing location
+cp /your/existing/ocserv.conf /usb1/ocserv-data/ocserv.conf
+
+# Update certificate paths in your config for container
+# Edit /usb1/ocserv-data/ocserv.conf:
+# server-cert = /etc/ocserv/certs/server-cert.pem
+# server-key = /etc/ocserv/certs/server-key.pem
+# auth = "plain[passwd=/etc/ocserv/ocpasswd]"
+
+# Create container
+/container
+add remote-image=yourusername/openconnect-ssl:latest \
+    interface=veth1 \
+    root-dir=/usb1/container-root \
+    logging=yes \
+    hostname=mikrotik-vpn
+
+# Configure environment variables
+/container/envs
+add name=POWER_USER value=yes key=mikrotik-vpn
+add name=SSL_DOMAIN value=vpn.yourdomain.com key=mikrotik-vpn
+add name=ACME_DNS_PROVIDER value=dns_cf key=mikrotik-vpn
+add name=CF_Token value=your_cloudflare_token key=mikrotik-vpn
+
+# Mount your configuration directory
+/container/mounts
+add dst=/etc/ocserv src=/usb1/ocserv-data key=mikrotik-vpn
+
+# Configure container networking
+/interface/veth
+add address=172.17.0.2/24 gateway=172.17.0.1 name=veth1
+
+/interface/bridge
+add name=docker0
+
+/interface/bridge/port
+add bridge=docker0 interface=veth1
+
+/ip/address
+add address=172.17.0.1/24 interface=docker0
+
+# Start container
+/container/start mikrotik-vpn
+```
+
+#### 🏗️ Method 2: Build Locally and Transfer to RouterOS
+
+This method is ideal when you want to build on your local computer and transfer to MikroTik without using Docker Hub.
+
+**Step 1: Build Docker Image Locally**
+
+```bash
+# Clone the repository on your local computer
+git clone https://github.com/dnwk/docker-openconnect.git
+cd docker-openconnect
+
+# Check your MikroTik architecture first (run on RouterOS):
+# /system resource print
+# Look for "architecture" field (x86-64, arm64, etc.)
+
+# Build for x86-64 MikroTik (most common)
+docker build --platform linux/amd64 -t openconnect-ssl:latest .
+
+# Or build for ARM64 MikroTik
+docker build --platform linux/arm64 -t openconnect-ssl:latest .
+
+# Or build for both architectures (requires buildx)
+docker buildx create --name multiarch --use
+docker buildx build --platform linux/amd64,linux/arm64 \
+  -t openconnect-ssl:latest --load .
+
+# Verify the image was created
+docker images | grep openconnect-ssl
+```
+
+**Step 2: Export Docker Image to TAR File**
+
+```bash
+# Export the built image to TAR file
+docker save -o openconnect-ssl.tar openconnect-ssl:latest
+
+# Check file size (should be ~200-300MB)
+ls -lh openconnect-ssl.tar
+
+# Optional: Compress to reduce transfer time
+gzip openconnect-ssl.tar
+# This creates openconnect-ssl.tar.gz (usually 50-70% smaller)
+
+ls -lh openconnect-ssl.tar.gz
+```
+
+**Step 3: Transfer TAR File to MikroTik RouterOS**
+
+Choose one of these transfer methods:
+
+**Option A: SCP Transfer (Linux/Mac/Windows with SSH client)**
+```bash
+# Transfer compressed file via SCP
+scp openconnect-ssl.tar.gz admin@192.168.1.1:/usb1/
+
+# Or transfer uncompressed file
+scp openconnect-ssl.tar admin@192.168.1.1:/usb1/
+```
+
+**Option B: SFTP Transfer**
+```bash
+# Connect via SFTP
+sftp admin@192.168.1.1
+
+# Navigate to USB storage
+cd /usb1/
+
+# Upload file
+put openconnect-ssl.tar.gz
+
+# Exit SFTP
+exit
+```
+
+**Option C: WinBox File Transfer (Windows)**
+1. Open WinBox and connect to your MikroTik
+2. Go to **Files** tab
+3. Navigate to **usb1** directory
+4. Click **Upload** button
+5. Select your `openconnect-ssl.tar.gz` file
+6. Wait for upload to complete
+
+**Option D: FTP Transfer**
+```bash
+# Enable FTP on RouterOS first (run on RouterOS):
+# /ip service enable ftp
+
+# Then upload via FTP from your computer
+ftp 192.168.1.1
+# Login with admin credentials
+# Navigate and upload file
+binary
+cd usb1
+put openconnect-ssl.tar.gz
+quit
+```
+
+**Option E: HTTP Upload (if RouterOS has web interface enabled)**
+1. Open web browser: `http://192.168.1.1`
+2. Login with admin credentials  
+3. Go to **Files** section
+4. Navigate to **usb1**
+5. Use upload function to transfer file
+
+**Step 4: Load Image on RouterOS**
+
+```bash
+# Connect to RouterOS terminal (SSH/WinBox/Console)
+
+# Navigate to where you uploaded the file
+cd /usb1
+
+# If you uploaded compressed file, decompress it first
+gunzip openconnect-ssl.tar.gz
+
+# Verify TAR file exists
+ls -la openconnect-ssl.tar
+
+# Import the Docker image into RouterOS container system
+/container/import file=openconnect-ssl.tar
+
+# Verify image was imported successfully
+/container/config/print
+# You should see openconnect-ssl:latest in the list
+
+# Check image details
+/container/config/print detail where repository="openconnect-ssl"
+```
+
+**Step 5: Deploy Container with Your Existing Config**
+
+```bash
+# Create directories for your configuration
+mkdir /usb1/ocserv-data
+mkdir /usb1/ocserv-data/certs
+mkdir /usb1/ocserv-data/logs
+mkdir /usb1/ocserv-data/config-per-user
+mkdir /usb1/ocserv-data/config-per-group
+
+# Copy your existing ocserv.conf (adjust path to your actual config location)
+cp /flash/ocserv.conf /usb1/ocserv-data/ocserv.conf
+# OR if stored elsewhere:
+# cp /usb1/backup/ocserv.conf /usb1/ocserv-data/ocserv.conf
+
+# Update certificate paths in your copied config file
+# You can edit with RouterOS built-in editor or upload modified version
+# Required changes in ocserv.conf:
+# server-cert = /etc/ocserv/certs/server-cert.pem  
+# server-key = /etc/ocserv/certs/server-key.pem
+# auth = "plain[passwd=/etc/ocserv/ocpasswd]"
+# default-domain = vpn.yourdomain.com
+
+# Copy existing user database (if you have one)
+cp /your/existing/ocpasswd /usb1/ocserv-data/ocpasswd
+chmod 600 /usb1/ocserv-data/ocpasswd
+
+# Create container using the imported image
+/container
+add remote-image=openconnect-ssl:latest \
+    interface=veth1 \
+    root-dir=/usb1/container-root \
+    logging=yes \
+    hostname=mikrotik-vpn
+
+# Configure environment variables (POWER_USER=yes preserves your config)
+/container/envs
+add name=POWER_USER value=yes key=mikrotik-vpn
+add name=SSL_DOMAIN value=vpn.yourdomain.com key=mikrotik-vpn
+add name=ACME_DNS_PROVIDER value=dns_cf key=mikrotik-vpn
+add name=CF_Token value=your_cloudflare_token key=mikrotik-vpn
+add name=DISABLE_SSL_AUTO value=false key=mikrotik-vpn
+
+# Mount your configuration directory
+/container/mounts
+add dst=/etc/ocserv src=/usb1/ocserv-data key=mikrotik-vpn
+
+# Configure networking
+/interface/veth
+add address=172.17.0.2/24 gateway=172.17.0.1 name=veth1
+
+/interface/bridge  
+add name=docker0
+
+/interface/bridge/port
+add bridge=docker0 interface=veth1
+
+/ip/address
+add address=172.17.0.1/24 interface=docker0
+
+# Start the container
+/container/start mikrotik-vpn
+
+# Verify container is running
+/container/print
+/log/print where topics~"container"
+```
+
+**Step 6: Configure Network Rules**
+
+```bash
+# Configure firewall and NAT (same as other methods)
+/ip/firewall/nat
+add chain=srcnat action=masquerade out-interface=ether1 \
+    src-address=192.168.255.0/24 comment="OpenConnect VPN NAT"
+
+add chain=dstnat action=dst-nat to-addresses=172.17.0.2 to-ports=4443 \
+    dst-port=4443 in-interface=ether1 protocol=tcp comment="OpenConnect TCP"
+
+add chain=dstnat action=dst-nat to-addresses=172.17.0.2 to-ports=4443 \
+    dst-port=4443 in-interface=ether1 protocol=udp comment="OpenConnect UDP"
+
+# For Let's Encrypt HTTP challenge (if using standalone mode)
+add chain=dstnat action=dst-nat to-addresses=172.17.0.2 to-ports=80 \
+    dst-port=80 in-interface=ether1 protocol=tcp comment="LE Challenge"
+
+/ip/firewall/filter
+add chain=input action=accept dst-port=4443 protocol=tcp
+add chain=input action=accept dst-port=4443 protocol=udp  
+add chain=forward action=accept src-address=192.168.255.0/24
+```
+
+**🔍 Troubleshooting Local Build and Transfer**
+
+```bash
+# If container won't start, check image architecture compatibility
+/system resource print
+/container/config/print detail where repository="openconnect-ssl"
+
+# Check available disk space
+/system resource print
+
+# View container import logs
+/log print where message~"container"
+
+# If image is too large, try building with smaller base image
+# Add this to Dockerfile before building:
+# RUN apk del .build-deps && rm -rf /var/cache/apk/* /tmp/*
+
+# Test container functionality
+/container/shell mikrotik-vpn
+# Inside container:
+ocserv --version
+ls -la /etc/ocserv/
+```
+
+**📊 File Size Optimization Tips**
+
+```bash
+# On your local computer, optimize image size before export:
+
+# Method 1: Multi-stage build (modify Dockerfile)
+# Use separate build and runtime stages
+
+# Method 2: Clean up after building  
+docker image prune -f
+
+# Method 3: Use smaller base image
+# Change FROM alpine:latest to alpine:3.18 (specific version)
+
+# Method 4: Compress with better algorithms
+tar -czf openconnect-ssl.tar.gz -C /tmp openconnect-ssl.tar
+# Or use xz compression (better compression, slower)
+xz -9 openconnect-ssl.tar
+```
+
+This method gives you complete control over the build process and doesn't require Docker Hub, making it perfect for air-gapped or restricted network environments.
+
+#### 🏗️ Method 3: Alternative TAR Export Method
+
+```bash
+# Build image locally
+git clone https://github.com/dnwk/docker-openconnect.git
+cd docker-openconnect
+
+# Build for your MikroTik's architecture
+# For x86-64 MikroTik:
+docker build --platform linux/amd64 -t openconnect-ssl:latest .
+
+# For ARM64 MikroTik:
+docker build --platform linux/arm64 -t openconnect-ssl:latest .
+
+# Export to TAR file
+docker save -o openconnect-ssl.tar openconnect-ssl:latest
+
+# Compress for faster transfer (optional)
+gzip openconnect-ssl.tar
+```
+
+**Step 2: Upload to MikroTik**
+
+```bash
+# Method A: Using SCP/SFTP
+scp openconnect-ssl.tar.gz admin@192.168.1.1:/usb1/
+
+# Method B: Using RouterOS file upload
+# Use WinBox -> Files -> Upload
+# Or via FTP to upload the TAR file
+
+# Method C: Using curl (if RouterOS has internet)
+# Upload to a temporary server and download on RouterOS
+/tool fetch url=http://yourserver.com/openconnect-ssl.tar.gz dst-path=/usb1/
+```
+
+**Step 3: Load and Deploy on MikroTik**
+
+```bash
+# Decompress if needed
+cd /usb1
+gunzip openconnect-ssl.tar.gz
+
+# Load image into container system
+/container/import file=openconnect-ssl.tar
+
+# Verify image is loaded
+/container/config/print
+
+# Create directories and copy config (same as Method 1)
+mkdir /usb1/ocserv-data
+mkdir /usb1/ocserv-data/certs
+mkdir /usb1/ocserv-data/logs
+
+# Copy your existing configuration
+cp /your/existing/ocserv.conf /usb1/ocserv-data/ocserv.conf
+
+# Create and configure container
+/container
+add remote-image=openconnect-ssl:latest \
+    interface=veth1 \
+    root-dir=/usb1/container-root \
+    logging=yes
+
+# Add environment variables and mounts (same as Method 1)
+/container/envs add name=POWER_USER value=yes key=mikrotik-container
+/container/envs add name=SSL_DOMAIN value=vpn.yourdomain.com key=mikrotik-container
+
+/container/mounts add dst=/etc/ocserv src=/usb1/ocserv-data key=mikrotik-container
+
+# Start container
+/container/start mikrotik-container
+```
+
+#### 🌐 MikroTik Network Configuration
+
+```bash
+# Configure firewall and NAT for VPN
+/ip/firewall/nat
+add chain=srcnat action=masquerade out-interface=ether1 src-address=192.168.255.0/24 comment="OpenConnect VPN NAT"
+
+# Forward VPN ports to container
+add chain=dstnat action=dst-nat to-addresses=172.17.0.2 to-ports=4443 \
+    dst-port=4443 in-interface=ether1 protocol=tcp comment="OpenConnect TCP"
+add chain=dstnat action=dst-nat to-addresses=172.17.0.2 to-ports=4443 \
+    dst-port=4443 in-interface=ether1 protocol=udp comment="OpenConnect UDP"
+
+# For Let's Encrypt HTTP challenge (temporary)
+add chain=dstnat action=dst-nat to-addresses=172.17.0.2 to-ports=80 \
+    dst-port=80 in-interface=ether1 protocol=tcp comment="Let's Encrypt Challenge"
+
+# Allow VPN traffic through firewall
+/ip/firewall/filter
+add chain=input action=accept dst-port=4443 protocol=tcp comment="Allow OpenConnect TCP"
+add chain=input action=accept dst-port=4443 protocol=udp comment="Allow OpenConnect UDP"
+add chain=forward action=accept src-address=192.168.255.0/24 comment="Allow VPN clients"
+```
+
+#### 📝 Adapting Your Existing ocserv.conf
+
+Update these paths in your existing `ocserv.conf` for container compatibility:
+
+```bash
+# Before (typical RouterOS paths):
+server-cert = /etc/ssl/certs/server.pem
+server-key = /etc/ssl/private/server.key
+auth = "plain[passwd=/etc/ocpasswd]"
+
+# After (container paths):
+server-cert = /etc/ocserv/certs/server-cert.pem
+server-key = /etc/ocserv/certs/server-key.pem
+auth = "plain[passwd=/etc/ocserv/ocpasswd]"
+connect-script = /etc/ocserv/connect.sh
+disconnect-script = /etc/ocserv/disconnect.sh
+
+# Add SSL domain for automatic certificate management
+default-domain = vpn.yourdomain.com
+```
+
+#### 🔍 MikroTik Container Management
+
+```bash
+# Check container status
+/container/print
+
+# View container logs
+/log/print where topics~"container"
+
+# Access container shell
+/container/shell mikrotik-container
+
+# Stop/start container
+/container/stop mikrotik-container
+/container/start mikrotik-container
+
+# Update container image
+/container/stop mikrotik-container
+/container/remove mikrotik-container
+# Then repeat deployment with new image
+
+# Monitor resources
+/system/resource/print
+```
+
+#### 🚨 MikroTik-Specific Considerations
+
+**Limitations:**
+- ❌ No `docker-compose` support
+- ❌ Limited container orchestration
+- ❌ No automatic image updates
+- ❌ Reduced container privileges
+
+**Best Practices:**
+- ✅ Use external storage (USB) for persistence
+- ✅ Regular backups of `/usb1/ocserv-data/`
+- ✅ Monitor CPU/memory usage
+- ✅ Use DNS challenge for SSL (avoids port 80 exposure)
+- ✅ Keep RouterOS updated
+
+**Troubleshooting:**
+```bash
+# Check container resources
+/container/print detail
+
+# View detailed logs
+/log/print where message~"container" and time>2024-01-01
+
+# Test container networking
+/container/shell mikrotik-container
+ping 8.8.8.8
+
+# Check certificate generation
+cat /etc/ocserv/logs/ssl-manager.log
+```
+
+#### 📋 Complete MikroTik Deployment Script
+
+Create this script to automate the deployment:
+
+```bash
+#!/bin/bash
+# mikrotik-deploy.sh - Run this on RouterOS terminal
+
+# Configuration
+CONTAINER_NAME="openconnect-vpn"
+IMAGE_NAME="yourusername/openconnect-ssl:latest"
+SSL_DOMAIN="vpn.yourdomain.com"
+STORAGE_PATH="/usb1"
+
+echo "Deploying OpenConnect VPN to MikroTik RouterOS..."
+
+# Create directory structure
+echo "Creating directories..."
+mkdir ${STORAGE_PATH}/ocserv-data
+mkdir ${STORAGE_PATH}/ocserv-data/certs
+mkdir ${STORAGE_PATH}/ocserv-data/logs
+mkdir ${STORAGE_PATH}/ocserv-data/config-per-user
+mkdir ${STORAGE_PATH}/ocserv-data/config-per-group
+
+# Copy existing config (adjust source path)
+echo "Copying existing configuration..."
+if [ -f "/etc/ocserv.conf" ]; then
+    cp /etc/ocserv.conf ${STORAGE_PATH}/ocserv-data/ocserv.conf
+    echo "Existing config copied"
+else
+    echo "No existing config found, will use defaults"
+fi
+
+# Create container
+echo "Creating container..."
+/container add remote-image=${IMAGE_NAME} interface=veth1 root-dir=${STORAGE_PATH}/container-root logging=yes hostname=mikrotik-vpn
+
+# Configure environment
+echo "Setting environment variables..."
+/container/envs add name=POWER_USER value=yes key=${CONTAINER_NAME}
+/container/envs add name=SSL_DOMAIN value=${SSL_DOMAIN} key=${CONTAINER_NAME}
+/container/envs add name=ACME_DNS_PROVIDER value=dns_cf key=${CONTAINER_NAME}
+
+# Mount volume
+echo "Mounting volumes..."
+/container/mounts add dst=/etc/ocserv src=${STORAGE_PATH}/ocserv-data key=${CONTAINER_NAME}
+
+# Configure networking
+echo "Configuring networking..."
+/interface/veth add address=172.17.0.2/24 gateway=172.17.0.1 name=veth1
+/interface/bridge add name=docker0
+/interface/bridge/port add bridge=docker0 interface=veth1
+/ip/address add address=172.17.0.1/24 interface=docker0
+
+# Start container
+echo "Starting container..."
+/container/start ${CONTAINER_NAME}
+
+echo "Deployment complete!"
+echo "Container status:"
+/container/print where name=${CONTAINER_NAME}
+```
+
+This comprehensive MikroTik section covers all deployment scenarios while preserving your existing `ocserv.conf` configuration!
 
 - [ ] Set strong passwords for all VPN users
 - [ ] Configure proper SSL domain with valid DNS
@@ -609,8 +1230,9 @@ secrets:
 ### Getting Help
 
 - **Documentation**: Check this README and inline code comments
-- **Logs**: Always check container and SSL manager logs first
+- **Repository**: [https://github.com/dnwk/docker-openconnect](https://github.com/dnwk/docker-openconnect)
 - **Issues**: Search existing issues before creating new ones
+- **Logs**: Always check container and SSL manager logs first
 
 ### Reporting Issues
 
@@ -639,6 +1261,7 @@ This project is licensed under the GNU General Public License v3.0 - see the [LI
 
 ## 🙏 Credits
 
+- **Enhanced OpenConnect Docker**: [dnwk/docker-openconnect](https://github.com/dnwk/docker-openconnect)
 - **Original OpenConnect Docker**: [MarkusMcNugen](https://github.com/MarkusMcNugen/docker-openconnect)
 - **OpenConnect Server**: [OpenConnect VPN Server](https://ocserv.gitlab.io/www/)
 - **acme.sh**: [acme.sh - ACME Shell Script](https://github.com/acmesh-official/acme.sh)
