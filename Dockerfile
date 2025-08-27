@@ -1,7 +1,13 @@
 FROM alpine:latest
 
-MAINTAINER MarkusMcNugen
 # Enhanced with automatic SSL certificate management using acme.sh
+LABEL maintainer="dnwk" \
+      description="OpenConnect VPN Server with automatic SSL certificate management" \
+      version="1.0" \
+      org.opencontainers.image.title="OpenConnect SSL VPN" \
+      org.opencontainers.image.description="OpenConnect VPN server with acme.sh SSL automation" \
+      org.opencontainers.image.vendor="dnwk" \
+      org.opencontainers.image.source="https://github.com/dnwk/docker-openconnect"
 
 VOLUME /etc/ocserv
 
